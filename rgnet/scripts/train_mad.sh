@@ -1,13 +1,21 @@
 ######## Data paths, need to replace them based on your directory
-train_path=data/mad_train.jsonl
-eval_path=data/mad_val.jsonl
+train_path=/workspace/RGNet/data/mad_train_.jsonl
+eval_path=/workspace/RGNet/data/mad_val_.jsonl
 eval_split_name=val
 results_root=results
 ######## Setup video/textual feature path, need to replace them based on youf
 # r directory
-motion_feat_dir=data/mad_data_for_cone/offline_lmdb/CLIP_B32_frames_features_5fps
-appearance_feat_dir=data/mad_data_for_cone/offline_lmdb/CLIP_B32_frames_features_5fps
-text_feat_dir=data/mad_data_for_cone/offline_lmdb/clip_clip_text_features
+# motion_feat_dir=/workspace/MAD/features/CLIP_B32_frames_features_5fps
+# appearance_feat_dir=/workspace/MAD/features/CLIP_B32_frames_features_5fps
+# text_feat_dir=/workspace/MAD/features/CLIP_text_features
+
+# motion_feat_dir=/workspace/RGNet/mad_data_for_cone/offline_lmdb/CLIP_B32_frames_features_5fps
+motion_feat_dir=/workspace/MAD/features/CLIP_B32_frames_features_5fps
+
+# appearance_feat_dir=/workspace/RGNet/mad_data_for_cone/offline_lmdb/CLIP_B32_frames_features_5fps
+appearance_feat_dir=/workspace/MAD/features/CLIP_B32_frames_features_5fps
+
+text_feat_dir=/workspace/RGNet/mad_data_for_cone/offline_lmdb/clip_clip_text_features
 
 # Feature dimension
 v_motion_feat_dim=512
@@ -21,7 +29,7 @@ lr_drop=25
 device_id=0
 num_queries=5
 max_v_l=900
-bsz=8
+bsz=2
 eval_bsz=8
 clip_length=0.2 ##  video feature are extracted by 5 FPS, thus a clip duration is 1/5 = 0.2 second
 max_q_l=25
@@ -40,7 +48,14 @@ retrieval_loss_coef=10
 pos_temperature=100
 exp_id=train_mad
 
-CUDA_LAUNCH_BLOCKING=1 TORCH_DISTRIBUTED_DEBUG=DETAIL PYTHONPATH=$PYTHONPATH:. srun -u -t 4-00:00:00 -J mad_train --gres=gpu:4 -c 32 python -m torch.distributed.launch --master_port $RANDOM --nproc_per_node=4 --use_env cone/train.py \
+# CUDA_LAUNCH_BLOCKING=1 TORCH_DISTRIBUTED_DEBUG=DETAIL PYTHONPATH=$PYTHONPATH:. python -m torch.distributed.launch --master_port $RANDOM --nproc_per_node=4 --use_env rgnet/train.py \
+
+# CUDA_VISIBLE_DEVICES=3 PYTHONPATH=$PYTHONPATH:. python rgnet/train.py \
+CUDA_VISIBLE_DEVICES="0,1" \
+CUDA_LAUNCH_BLOCKING=1 \
+TORCH_DISTRIBUTED_DEBUG=DETAIL \
+PYTHONPATH=$PYTHONPATH:. \
+torchrun --master_port=$RANDOM --nproc_per_node=2 rgnet/train.py \
 --gumbel_eps 0.3 \
 --gumbel_single_proj \
 --nms_thd 0.5 \
@@ -90,4 +105,8 @@ CUDA_LAUNCH_BLOCKING=1 TORCH_DISTRIBUTED_DEBUG=DETAIL PYTHONPATH=$PYTHONPATH:. s
 --dabdetr \
 --pos_temperature ${pos_temperature} \
 --dim_feedforward 2048 \
+--num_queries 2 \
+--m_classes "[12, 150]" \
+--cc_matching \
+--tgt_embed \
 ${@:6}

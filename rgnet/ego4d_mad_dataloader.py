@@ -33,7 +33,8 @@ class StartEndDataset(Dataset):
                  max_q_l=20, max_v_l=90, data_ratio=1.0, ctx_mode="video",
                  normalize_v=True, normalize_t=True, load_labels=True, query_id2windowidx=None,
                  topk_window=30, clip_len=2, max_windows=5, span_loss_type="l1", txt_drop_ratio=0, is_eval=False,
-                 ret_eval=False, comb_ret_eval=False, winret=False, online_loader=False, input_fps_reduction=1):
+                 ret_eval=False, comb_ret_eval=False, winret=False, online_loader=False, input_fps_reduction=1,
+                 m_classes=None):
         self.online_loader=online_loader
         self.winret=winret
         self.comb_ret_eval=comb_ret_eval
@@ -66,6 +67,12 @@ class StartEndDataset(Dataset):
         # define the window stride as the half size of the window length
         self.slide_window_size = int(max_v_l / 2)
         self.eval = is_eval
+
+        if m_classes is not None:
+            self.m_vals = [int(v) for v in m_classes[1:-1].split(',')]
+        else:
+            self.m_vals = None
+
         timer_start = time.time()
 
         # use lmdb to load visual and textual feature
@@ -163,19 +170,19 @@ class StartEndDataset(Dataset):
         query_feat, query_cls_feat = self._get_query_feat_by_qid(_meta["query_id"])
 
         assert self.use_video
-        if self.online_loader and _meta["clip_id"] not in self.videofeat:
+        if self.online_loader and _meta["clip_id"] not in self.videofeat: # False
             self.videofeat[_meta["clip_id"]] = self._get_video_appearance_feat_by_vid(_meta["clip_id"])
-        video_clip_feat = self.videofeat[_meta["clip_id"]]
-        if self.same_visual_path:
+        video_clip_feat = self.videofeat[_meta["clip_id"]] # (duration * 5, 512)
+        if self.same_visual_path: # True
             video_motion_feat = video_clip_feat
         else:
             video_motion_feat = self.motion_videofeat[_meta["clip_id"]]
             #video_motion_feat = self._get_video_motion_feat_by_vid(_meta["clip_id"])
-        video_clip_feat = video_clip_feat[::self.input_fps_reduction]
+        video_clip_feat = video_clip_feat[::self.input_fps_reduction] # self.input_fps_reduction=1 -> (duration * 5, 512)
         video_motion_feat = video_motion_feat[::self.input_fps_reduction]
-        ctx_l = len(video_clip_feat)
+        ctx_l = len(video_clip_feat) # 39604
         assert ctx_l > 0, ctx_l
-        num_window = math.ceil(ctx_l / self.slide_window_size) + 1
+        num_window = math.ceil(ctx_l / self.slide_window_size) + 1 #self.slide_window_size =450 -> 90
 
         if self.eval:
             # select top-k windows for inference
@@ -229,9 +236,12 @@ class StartEndDataset(Dataset):
             new_end = min((idx - 1) * self.slide_window_size + self.max_v_l, ctx_l)
             tmp_video_motion_feat = video_motion_feat[new_start:new_end, :]
             tmp_video_appearance_feat = video_clip_feat[new_start:new_end, :]
+            
+            video_length = new_end - new_start
+            video_start = new_start
             tmp_model_inputs = {
-                'video_length': new_end - new_start,
-                'video_start': new_start,
+                # 'video_length': new_end - new_start,
+                # 'video_start': new_start,
                 'video_motion_feat': tmp_video_motion_feat,
                 'query_feat': query_feat}
             tmp_model_clip_inputs = {
@@ -239,12 +249,29 @@ class StartEndDataset(Dataset):
                 'query_cls_feat': query_cls_feat, }
 
             # span_proposal ground-truth
-            start_pos = max((idx - 1) * self.slide_window_size, start) - tmp_model_inputs["video_start"]
-            end_pos = min((idx - 1) * self.slide_window_size + self.max_v_l, end) - tmp_model_inputs["video_start"]
-            tmp_span_labels = self.get_span_labels([[start_pos, end_pos]], tmp_model_inputs['video_length'])
+            start_pos = max((idx - 1) * self.slide_window_size, start) - video_start
+            end_pos = min((idx - 1) * self.slide_window_size + self.max_v_l, end) - video_start
+            tmp_span_labels, lengths = self.get_span_labels([[start_pos, end_pos]], video_length)
             tmp_model_inputs.update({'span_labels': tmp_span_labels})
-            assert 0 <= math.floor(start_pos) < math.ceil(end_pos), [start, end, idx, tmp_model_inputs["video_start"],
+            assert 0 <= math.floor(start_pos) < math.ceil(end_pos), [start, end, idx, video_start,
                                                                      start_pos, end_pos, _meta]
+
+            moment_class = []
+            if self.m_vals is not None:
+                for l in lengths:
+                    for m_cls, m_val in enumerate(self.m_vals):
+                        if l <= m_val:
+                            moment_class.append(m_cls)
+                            break
+                tmp_model_inputs.update({'moment_class': torch.tensor(moment_class)})
+                if len(tmp_model_inputs["moment_class"]) != len(lengths):
+                    print('getitem error')
+                    
+            # print("=================================")
+            # print(tmp_model_inputs.keys())
+            # print("=================================")
+            
+                                                                                                                          
             tmp_model_clip_inputs.update(
                 {'span_proposal': torch.IntTensor([[math.floor(start_pos), math.ceil(end_pos)]])})
 
@@ -253,7 +280,7 @@ class StartEndDataset(Dataset):
             rel_clip_ids = list(range(math.floor(start_pos), math.ceil(end_pos)))
             if not len(rel_clip_ids):
                 rel_clip_ids = [math.floor(start_pos)]
-            easy_neg_pool = list(set(range(tmp_model_inputs['video_length'])) - set(rel_clip_ids))
+            easy_neg_pool = list(set(range(video_length)) - set(rel_clip_ids))
             if not len(easy_neg_pool):
                 easy_neg_pool = [0]
             tmp_model_inputs.update({"saliency_pos_labels": random.sample(rel_clip_ids, k=1)})
@@ -272,12 +299,13 @@ class StartEndDataset(Dataset):
             model_clip_inputs.append(tmp_model_clip_inputs)
             model_inputs.append(tmp_model_inputs)
 
-        meta = []
-        for idx in range(len(model_inputs)):
-            item = _meta.copy()
-            item['duration'] = model_inputs[idx]['video_length']
-            item['video_start'] = model_inputs[idx]['video_start']
-            meta.append(item)
+        # meta = []
+        # for idx in range(len(model_inputs)):
+        #     item = _meta.copy()
+        #     item['duration'] = model_inputs[idx]['video_length']
+        #     item['video_start'] = model_inputs[idx]['video_start']
+        #     meta.append(item)
+        meta = _meta
 
         return dict(meta=meta, model_inputs=model_inputs, model_clip_inputs=model_clip_inputs)
 
@@ -290,6 +318,11 @@ class StartEndDataset(Dataset):
         if len(windows) > self.max_windows:
             random.shuffle(windows)
             windows = windows[:self.max_windows]
+
+        lengths = []
+        for w in windows:
+            lengths.append(w[1]-w[0])
+
         if self.span_loss_type == "l1":
             windows = torch.Tensor(windows) / ctx_l  # normalized windows in xx
             windows = span_xx_to_cxw(windows)  # normalized windows in cxw
@@ -299,7 +332,7 @@ class StartEndDataset(Dataset):
                 for w in windows]).long()  # inclusive
         else:
             raise NotImplementedError
-        return windows
+        return windows, lengths
 
     def _get_query_feat_by_qid(self, qid):
         """
@@ -368,7 +401,10 @@ def start_end_collate(batch):
             batched_data[k] = torch.LongTensor([item[k] for e in batch for item in e['model_inputs']])
             continue
         if k in ["video_start", "video_length"]:
-            batched_data[k] = torch.IntTensor([item[k] for e in batch for item in e['model_inputs']])
+            # batched_data[k] = torch.IntTensor([item[k] for e in batch for item in e['model_inputs']])
+            continue
+        if k == "moment_class":
+            batched_data[k] = [dict(m_cls=item["moment_class"]) for e in batch for item in e['model_inputs']]
             continue
 
         seq = [item[k] for e in batch for item in e['model_inputs']]
@@ -438,7 +474,12 @@ def prepare_movie_inputs(batched_model_inputs, batched_clip_model_inputs, opt, n
             dict(proposal=e["proposal"].to(device, non_blocking=non_blocking))
             for e in batched_clip_model_inputs["span_proposal"]
         ]
-
+    if "moment_class" in batched_model_inputs:
+        targets["moment_class"] = [
+            dict(m_cls=e["m_cls"].to(device, non_blocking=non_blocking))
+            for e in batched_model_inputs["moment_class"]
+        ]
+        
     targets = None if len(targets) == 0 else targets
     return pos_model_inputs, pos_clip_model_inputs, (neg_model_inputs, neg_clip_model_inputs), targets
 
@@ -487,6 +528,13 @@ def prepare_batch_inputs(batched_model_inputs, batched_clip_model_inputs, device
             dict(proposal=e["proposal"].to(device, non_blocking=non_blocking))
             for e in batched_clip_model_inputs["span_proposal"]
         ]
+
+    if "moment_class" in batched_model_inputs:
+        targets["moment_class"] = [
+            dict(m_cls=e["m_cls"].to(device, non_blocking=non_blocking))
+            for e in batched_model_inputs["moment_class"]
+        ]
+
 
     targets = None if len(targets) == 0 else targets
     return pos_model_inputs, pos_clip_model_inputs, (neg_model_inputs, neg_clip_model_inputs), targets

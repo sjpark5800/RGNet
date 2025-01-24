@@ -24,7 +24,8 @@ class RGNet(nn.Module):
     def __init__(self, transformer, position_embed, txt_position_embed, txt_dim, vid_motion_dim, vid_appear_dim,
                  num_queries, input_dropout, aux_loss=False, max_v_l=75, span_loss_type="l1", use_txt_pos=False,
                  n_input_proj=2, adapter_module="linear", decoder_gating=False, qddetr=False, winret_neg_loss=False,
-                 samp_loc_loss=False, dabdetr=False, gumbel=False,multiscale=False,topk=10):
+                 samp_loc_loss=False, dabdetr=False, gumbel=False,multiscale=False,topk=10,
+                 m_classes=None, class_anchor=False):
         """ Initializes the model.
         Parameters:
             transformer: torch module of the transformer architecture. See transformer.py
@@ -55,15 +56,28 @@ class RGNet(nn.Module):
         self.span_loss_type = span_loss_type
         self.max_v_l = max_v_l
         span_pred_dim = 2 if span_loss_type == "l1" else max_v_l * 2
-        self.span_embed = MLP(hidden_dim, hidden_dim, span_pred_dim, 3)
         self.winret_neg_loss = winret_neg_loss
-        self.class_embed = nn.Linear(2 * hidden_dim if winret_neg_loss else hidden_dim, 2)  # 0: background, 1: foreground
+
+        self.m_classes=m_classes
+        if self.m_classes is None:
+            self.span_embed = MLP(hidden_dim, hidden_dim, span_pred_dim, 3)
+            self.class_embed = nn.Linear(hidden_dim, 2)  # 0: background, 1: foreground
+            self.num_patterns = 1
+        else:
+            self.m_vals = [int(v) for v in m_classes[1:-1].split(',')]
+            if class_anchor:
+                self.num_patterns = len(self.m_vals)
+            else:
+                self.num_patterns = 1
+            self.class_embed = nn.Linear(hidden_dim, 2)
+            self.span_embed = MLP(hidden_dim, hidden_dim, span_pred_dim, 3)
 
         self.use_txt_pos = use_txt_pos
         self.n_input_proj = n_input_proj
         self.dabdetr = dabdetr
         if self.dabdetr:
             self.query_embed = nn.Embedding(num_queries, 2)
+            self.query_embed = nn.Embedding(num_queries, 2*self.num_patterns)
         else:
             self.query_embed = nn.Embedding(num_queries, hidden_dim)
         relu_args = [True] * 3
@@ -312,7 +326,7 @@ class SetCriterion(nn.Module):
     """
 
     def __init__(self, matcher, weight_dict, eos_coef, losses, temperature, span_loss_type, max_v_l,
-                 saliency_margin=1, qddetr=False, winret_neg_loss=False,samp_loc_loss=False):
+                 saliency_margin=1, qddetr=False, winret_neg_loss=False,samp_loc_loss=False, m_classes=None, ):
         """ Create the criterion.
         Parameters:
             matcher: module able to compute a matching between targets and proposals
@@ -343,6 +357,10 @@ class SetCriterion(nn.Module):
         self.qddetr= qddetr
         self.winret_neg_loss=winret_neg_loss
         self.samp_loc_loss=samp_loc_loss
+
+        self.m_classes = m_classes
+        if m_classes is not None: 
+            self.num_classes = len(m_classes[1:-1].split(','))
 
     def loss_retrieval(self, outputs, targets, indices=None, neg_outputs=None, n_outputs=None, log=True):
         """Classification loss (NLL)
@@ -681,7 +699,9 @@ def build_model(args):
         dabdetr=args.dabdetr,
         gumbel=args.gumbel,
         multiscale=args.multiscale,
-        topk=args.topk
+        topk=args.topk,
+        m_classes=args.m_classes,
+        class_anchor=args.class_anchor,
     )
 
     matcher = build_matcher(args)
@@ -713,7 +733,8 @@ def build_model(args):
         eos_coef=args.eos_coef, temperature=args.temperature,
         span_loss_type=args.span_loss_type, max_v_l=args.max_v_l,
         saliency_margin=args.saliency_margin,qddetr=args.qddetr,
-        winret_neg_loss=args.winret_neg_loss,samp_loc_loss=args.samp_loc_loss
+        winret_neg_loss=args.winret_neg_loss,samp_loc_loss=args.samp_loc_loss,
+        m_classes=args.m_classes,
     )
     criterion.to(device)
     return model, criterion

@@ -363,7 +363,8 @@ def start_training():
         topk_window=opt.topk_window,
         winret=opt.winret,
         online_loader=opt.online_loader,
-        input_fps_reduction=opt.input_fps_reduction
+        input_fps_reduction=opt.input_fps_reduction,
+        m_classes=opt.m_classes,
     )
 
     dataset_config["data_path"] = opt.train_path
